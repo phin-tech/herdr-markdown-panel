@@ -5,7 +5,7 @@
 // the ones to review in data/markdown-review; watchOpens picks both up.
 // doc.js and blocks.js are synced copies of kanso-panel's; edit those.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { appHome, exec, watchFolder, focused, spaces, props, closeOverlay, run, theme, home } from "herdr";
 import { MarkdownDoc, tildePath } from "./doc.js";
 
@@ -33,9 +33,35 @@ export async function waitingReviews(dir) {
 }
 export const reviewsIn = (out) => out.split("\0").map((l) => l.split("\t")).filter(([id, path]) => /^\d+$/.test(id ?? "") && path?.startsWith("/")).map(([id, path]) => ({ id, path: path.trim() }));
 
+const LIST_MAX = 40, FILES_MAX = 5000;
 export function markdownIn(listing) {
   return listing.split("\n").map((l) => l.trim()).filter((l) => /\.(md|markdown|mdx)$/i.test(l))
-    .toSorted((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b)).slice(0, 40);
+    .toSorted((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b)).slice(0, FILES_MAX);
+}
+
+// How well `query` fuzzy-matches `path`: its characters in order, not necessarily together.
+// null when they aren't all there. Runs, word starts and the file name score higher; spaces are ignored.
+export function fuzzyScore(query, path) {
+  const q = query.toLowerCase().replace(/\s+/g, ""), s = path.toLowerCase();
+  if (!q) return 0;
+  const nameAt = s.search(/[^\\/]*$/);
+  let at = s.length, score = 0;
+  // Right to left, so a query ending in the file name is matched there and not in a folder.
+  for (let i = q.length - 1, run = 0; i >= 0; i--) {
+    const j = s.lastIndexOf(q[i], at - 1);
+    if (j < 0) return null;
+    run = j === at - 1 ? run + 1 : 0;
+    score += 1 + run * 2 + (j === 0 || "/\\-_. ".includes(s[j - 1]) ? 3 : 0) + (j >= nameAt ? 2 : 0);
+    at = j;
+  }
+  return score - s.length * 0.01;
+}
+
+// The paths that match, best first; all of them in order when there's no query.
+export function fuzzyFilter(query, paths, max = LIST_MAX) {
+  if (!query.trim()) return paths.slice(0, max);
+  return paths.map((p) => [p, fuzzyScore(query, p)]).filter(([, n]) => n !== null)
+    .toSorted((a, b) => b[1] - a[1]).slice(0, max).map(([p]) => p);
 }
 
 // The focused pane's machine (null: this one) and folder. A pane on an SSH
@@ -62,6 +88,11 @@ export default class MarkdownPanel extends View {
     const { on, folder } = placeOf(focused(), spaces(), home());
     this.on = on; this.folder = folder;
     this.handle = cx.focus_handle();
+    this.query = "";
+    this.input = InputState.new({ placeholder: "Find a Markdown file…" });
+    this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
+    this.input.on("submit", (_e, cx) => { const first = this.matches()[0]; if (first) this.open(first.path, cx, first.on); });
+    this.input.focus();
     // A binding, not on_key_down: a focused Textarea takes Escape first.
     cx.bind_keys(["MarkdownPanel", "MarkdownPanel > Input"].map((context) => ({ keystroke: "escape", action: "markdown_panel_escape", context })));
     this.watchOpens(cx, OPEN_DIR, false);
@@ -193,8 +224,29 @@ export default class MarkdownPanel extends View {
     cx.spawn(async (cx) => {
       if (!(await doc.flush())) { cx.notify(); return; }
       doc.release(); this.doc = null;
+      this.input.focus();
       cx.notify();
     });
+  }
+
+  // Escape empties the search before it closes the panel.
+  escape(cx) {
+    const doc = this.doc;
+    if (doc && doc.active !== null) { doc.close(); cx.notify(); }
+    else if (!doc && this.query) { this.input.set_value(""); this.query = ""; cx.notify(); }
+    else this.dismiss(cx);
+  }
+
+  // The rows the search keeps, by section: { section, path (absolute), on }.
+  matches() {
+    const waiting = [...new Set(this.reviewing.map((x) => x.path))];
+    const shown = (paths) => fuzzyFilter(this.query, paths, this.query ? LIST_MAX : paths.length);
+    return [
+      ...shown(waiting).map((path) => ({ section: "waiting", path, on: null })),
+      ...shown(this.recent).map((path) => ({ section: "recent", path, on: null })),
+      // Scored on the path inside the folder, so the folder's own name matches nothing.
+      ...fuzzyFilter(this.query, this.files ?? []).map((f) => ({ section: "folder", path: `${this.folder}/${f}`, on: this.on })),
+    ];
   }
 
   render() {
@@ -205,7 +257,7 @@ export default class MarkdownPanel extends View {
       .child(svg(`${ICONS}/${icon}.svg`).size(14));
     const reviewing = Boolean(doc) && !doc.on && this.reviewing.some((x) => x.path === doc.path);
     return v_flex().id("markdown-panel").key_context("MarkdownPanel").track_focus(this.handle)
-      .on_action("markdown_panel_escape", (_e, cx) => { if (doc && doc.active !== null) { doc.close(); cx.notify(); } else this.dismiss(cx); })
+      .on_action("markdown_panel_escape", (_e, cx) => this.escape(cx))
       .size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .on_key_down((e, cx) => doc?.key(e, cx))
       .child(h_flex().h(42).flex_none().px(10).gap(6).items_center().border_b(1).border_color(t.border)
@@ -224,22 +276,29 @@ export default class MarkdownPanel extends View {
   }
 
   listView(t) {
-    const files = this.files ?? [], recent = this.recent;
-    // Reviews still waiting come first, so one closed by mistake is never out of reach.
-    const waiting = [...new Set(this.reviewing.map((x) => x.path))];
+    const matches = this.matches(), rel = (p) => p.slice(this.folder.length + 1);
     const row = (id, name, sub, open) => h_flex().id(id).flex_none().h(30).px(10).gap(8).items_center().rounded(6).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => open(cx))
       .child(div().flex_none().truncate().child(name))
       .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(sub));
     const heading = (text) => div().flex_none().px(10).pt(8).pb(2).text_size(11).text_color(t.dim).child(text);
-    const empty = this.files === null ? "Looking for Markdown…" : "No Markdown files in this folder. Cmd-click a .md path in a terminal to read it here.";
-    return div().id("md-files").flex_1().min_h(0).overflow_y_scrollbar().p(6)
-      .when(waiting.length > 0, (el) => el.child(heading("Waiting for your review"))
-        .children(waiting.map((p, i) => row(`md-waiting-${i}`, nameOf(p), tildePath(folderOf(p), null), (cx) => this.open(p, cx)))))
-      .when(recent.length > 0, (el) => el.child(heading("From this terminal"))
-        .children(recent.map((p, i) => row(`md-recent-${i}`, nameOf(p), tildePath(folderOf(p), null), (cx) => this.open(p, cx)))))
-      .when(recent.length > 0 || waiting.length > 0, (el) => el.child(heading("In this folder")))
-      .when(!files.length, (el) => el.child(div().flex_none().px(10).py(6).text_size(12.5).text_color(t.dim).child(empty)))
-      .children(files.map((f, i) => row(`md-file-${i}`, nameOf(f), f.includes("/") ? folderOf(f) : "", (cx) => this.open(`${this.folder}/${f}`, cx, this.on))));
+    const of = (section) => matches.filter((m) => m.section === section);
+    // Reviews still waiting come first, so one closed by mistake is never out of reach.
+    const waiting = of("waiting"), recent = of("recent"), files = of("folder");
+    const empty = this.files === null ? "Looking for Markdown…"
+      : this.query ? "No Markdown file matches."
+      : "No Markdown files in this folder. Cmd-click a .md path in a terminal to read it here.";
+    const rowOf = (m, i) => row(`md-${m.section}-${i}`, nameOf(m.path),
+      m.section === "folder" ? (rel(m.path).includes("/") ? folderOf(rel(m.path)) : "") : tildePath(folderOf(m.path), null),
+      (cx) => this.open(m.path, cx, m.on)).when(Boolean(this.query) && m === matches[0], (el) => el.bg(t.hover));
+    return v_flex().flex_1().min_h(0)
+      .child(h_flex().h(32).flex_none().mx(8).mt(8).px(8).gap(8).items_center().rounded(7).border_1().border_color(t.border).bg(t.raised)
+        .child(Input.new(this.input).flex_1().h_full().text_size(12.5).text_color(t.foreground)))
+      .child(div().id("md-files").flex_1().min_h(0).overflow_y_scrollbar().p(6)
+        .when(waiting.length > 0, (el) => el.child(heading("Waiting for your review")).children(waiting.map(rowOf)))
+        .when(recent.length > 0, (el) => el.child(heading("From this terminal")).children(recent.map(rowOf)))
+        .when(recent.length > 0 || waiting.length > 0, (el) => el.child(heading("In this folder")))
+        .when(!files.length, (el) => el.child(div().flex_none().px(10).py(6).text_size(12.5).text_color(t.dim).child(empty)))
+        .children(files.map(rowOf)));
   }
 }
