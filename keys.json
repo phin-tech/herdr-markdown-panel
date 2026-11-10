@@ -1,0 +1,6 @@
+{
+  "global": {
+    "cmd-shift-m": "mod.open:markdown-panel",
+    "cmd-alt-m": {"command": "pane.split", "args": {"direction": "right", "mod": "markdown-panel"}}
+  }
+}
