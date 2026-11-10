@@ -93,6 +93,8 @@ export default class MarkdownPanel extends View {
     this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
     this.input.on("submit", (_e, cx) => { const first = this.matches()[0]; if (first) this.open(first.path, cx, first.on); });
     this.input.focus();
+    // A split pane is focused after init, which takes the focus back; ask again once it has.
+    cx.timer.after(600, () => { if (!this.doc) this.input.focus(); });
     // A binding, not on_key_down: a focused Textarea takes Escape first.
     cx.bind_keys(["MarkdownPanel", "MarkdownPanel > Input"].map((context) => ({ keystroke: "escape", action: "markdown_panel_escape", context })));
     this.watchOpens(cx, OPEN_DIR, false);
