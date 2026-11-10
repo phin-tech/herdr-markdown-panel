@@ -11,7 +11,9 @@ A markdown viewer and editor for the [Herdr app](https://herdr.dev), forked from
 
 ## Install
 
-Copy `mods/markdown-panel` to `~/.config/herdr-app/mods/` and merge `keys.json` into `~/.config/herdr-app/keys.json`.
+Tell your agent: **`add the herdr mod at github.com/phin-tech/herdr-markdown-panel, and link bin/md-tab onto my PATH`**
+
+Or by hand: copy `mods/markdown-panel` to `~/.config/herdr-app/mods/` and merge `keys.json` into `~/.config/herdr-app/keys.json`.
 
 | Key | Does |
 |---|---|
