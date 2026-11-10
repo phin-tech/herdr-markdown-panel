@@ -1,6 +1,6 @@
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState, TextView, Textarea, TextareaState } from "gpui-base";
-import { readTextFile, writeTextFile, theme, settings, home, focused, panes, run } from "herdr";
+import { readTextFile, writeTextFile, theme, settings, home, focused, panes, run, exec } from "herdr";
 import { parseBlocks, joinBlocks, headingOf, headingLine, parseTable, tableLines } from "./blocks.js";
 
 const MAX_TEXT = 400000;
@@ -41,6 +41,7 @@ export class MarkdownDoc {
     this.saved = null;
     this.text = null;
     this.blocks = [];
+    this.runNote = null; // why Run in terminal did nothing
     this.copied = null;  // the code block whose Copy button just ran
     this.active = null;  // the block being edited
     this.box = null;     // its text, or a table's cells
@@ -316,6 +317,7 @@ export class MarkdownDoc {
         })
         .child(flash(key) ? done : label);
     return h_flex().w_full().px(8).gap(2).justify_end()
+      .child(button(`run${i}`, "Run in terminal", this.runNote ?? "Sent", (cx) => this.runInTerminal(b, cx)))
       .child(button(`paste${i}`, "Paste in terminal", this.pasteNote ?? "Pasted", (cx) => this.pasteInTerminal(b, cx)))
       .child(button(`copy${i}`, "Copy", "Copied", (cx) => cx.write_to_clipboard(codeText(b.lines))));
   }
@@ -329,6 +331,15 @@ export class MarkdownDoc {
     cx.write_to_clipboard(codeText(b.lines));
     run("pane.focus", { pane: shell.pane });
     cx.spawn(async () => { await cx.sleep(PASTE_DELAY_MS); run("terminal.paste"); });
+  }
+
+  // Sends and presses Enter. A pane running an agent is skipped, so a command never lands in its prompt.
+  runInTerminal(b, cx) {
+    const tab = focused()?.tab;
+    const shell = panes().find((p) => p.tab === tab && p.terminal && !p.app);
+    this.runNote = shell ? null : "No shell in this tab";
+    if (!shell) return;
+    exec("hc", ["send", shell.terminal, codeText(b.lines)]).catch(() => {});
   }
 
   markdownBlock(b, i, t, id, md) {

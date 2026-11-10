@@ -7,6 +7,7 @@ A markdown viewer and editor for the [Herdr app](https://herdr.dev), forked from
 
 - **Split pane.** Opens beside a terminal as well as in the floating window. Close and Escape close the pane when there is no window.
 - **Copy button** above each fenced code block. It copies the code without the fences.
+- **Run in terminal button** above each fenced code block. It sends the code to the first plain shell pane of the same tab and **presses Enter**. A pane running an agent is skipped.
 - **Paste in terminal button** above each fenced code block. It pastes into the first terminal pane of the same tab and does **not** press Enter.
 
 ## Install
