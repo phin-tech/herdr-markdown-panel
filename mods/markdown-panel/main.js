@@ -158,7 +158,8 @@ export default class MarkdownPanel extends View {
     });
   }
 
-  close(cx) {
+  // Not `close`: herdr calls that hook when the pane's tab goes, and pane.close would hit the focused pane.
+  dismiss(cx) {
     const doc = this.doc, id = props()?.overlay;
     // As a split pane there is no overlay; close the focused pane (the one just clicked).
     const done = () => { if (id) closeOverlay(id); else run("pane.close"); };
@@ -182,7 +183,7 @@ export default class MarkdownPanel extends View {
       if (r.code !== 0) { this.notice = `md-review was not told: ${(r.stderr || "the marker could not be written").trim()}`; cx.notify(); return; }
       this.reviewing = this.reviewing.filter((x) => x.path !== doc.path); this.notice = null;
       // Another review still waits: show it rather than close.
-      if (this.reviewing.length) this.open(this.reviewing.at(-1).path, cx, null, true); else this.close(cx);
+      if (this.reviewing.length) this.open(this.reviewing.at(-1).path, cx, null, true); else this.dismiss(cx);
     });
   }
 
@@ -204,7 +205,7 @@ export default class MarkdownPanel extends View {
       .child(svg(`${ICONS}/${icon}.svg`).size(14));
     const reviewing = Boolean(doc) && !doc.on && this.reviewing.some((x) => x.path === doc.path);
     return v_flex().id("markdown-panel").key_context("MarkdownPanel").track_focus(this.handle)
-      .on_action("markdown_panel_escape", (_e, cx) => { if (doc && doc.active !== null) { doc.close(); cx.notify(); } else this.close(cx); })
+      .on_action("markdown_panel_escape", (_e, cx) => { if (doc && doc.active !== null) { doc.close(); cx.notify(); } else this.dismiss(cx); })
       .size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .on_key_down((e, cx) => doc?.key(e, cx))
       .child(h_flex().h(42).flex_none().px(10).gap(6).items_center().border_b(1).border_color(t.border)
@@ -217,7 +218,7 @@ export default class MarkdownPanel extends View {
         .when(reviewing, (el) => el.child(div().id("md-done").flex_none().px(8).py(3).rounded(6).cursor_pointer().text_size(12)
           .bg(t.raised).border_1().border_color(t.border).tooltip("Review done: tell the agent").hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => this.done(cx)).child("Done")))
-        .child(button("md-close", "close", "Close", (cx) => this.close(cx))))
+        .child(button("md-close", "close", "Close", (cx) => this.dismiss(cx))))
       .when(Boolean(this.notice), (el) => el.child(div().flex_none().px(14).py(6).text_size(12).text_color(t.blocked).border_b(1).border_color(t.border).child(this.notice ?? "")))
       .child(doc ? doc.body(t, "md-doc") : this.listView(t));
   }
