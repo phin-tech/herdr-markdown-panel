@@ -5,8 +5,8 @@
 // the ones to review in data/markdown-review; watchOpens picks both up.
 // doc.js and blocks.js are synced copies of kanso-panel's; edit those.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { appHome, exec, watchFolder, focused, spaces, props, closeOverlay, run, theme, home } from "herdr";
+import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
+import { appHome, exec, watchFolder, focused, spaces, props, closeOverlay, run, theme, home, nextCommand, shared, setShared } from "herdr";
 import { MarkdownDoc, tildePath } from "./doc.js";
 
 const ICONS = "mods/markdown-panel/icons";
@@ -15,7 +15,7 @@ const folderOf = (path) => path.replace(/[\\/][^\\/]*$/, "") || "/";
 const nameOf = (path) => path.split(/[\\/]/).at(-1);
 const REMOTE_READ_MS = 3000;
 const OPEN_DIR = "data/kanso-open", REVIEW_DIR = "data/markdown-review", WAITING_DIR = "data/markdown-review-waiting", DONE_DIR = "data/markdown-review-done";
-const RECENT_MAX = 15;
+const RECENT_MAX = 15, OPENED_MAX = 100, OPENED_KEY = "markdown-panel.opened";
 
 // Reads and removes the paths waiting in the inbox, oldest first.
 export async function takeAllOpens(dir) {
@@ -40,11 +40,12 @@ export function markdownIn(listing) {
 }
 
 // How well `query` fuzzy-matches `path`: its characters in order, not necessarily together.
-// null when they aren't all there. Runs, word starts and the file name score higher; spaces are ignored.
-export function fuzzyScore(query, path) {
+// { score, hits } (the matched indexes of `path`), or null when they aren't all there.
+// Runs, word starts and the file name score higher; spaces are ignored.
+export function fuzzyMatch(query, path) {
   const q = query.toLowerCase().replace(/\s+/g, ""), s = path.toLowerCase();
-  if (!q) return 0;
-  const nameAt = s.search(/[^\\/]*$/);
+  if (!q) return { score: 0, hits: [] };
+  const nameAt = s.search(/[^\\/]*$/), hits = [];
   let at = s.length, score = 0;
   // Right to left, so a query ending in the file name is matched there and not in a folder.
   for (let i = q.length - 1, run = 0; i >= 0; i--) {
@@ -52,16 +53,33 @@ export function fuzzyScore(query, path) {
     if (j < 0) return null;
     run = j === at - 1 ? run + 1 : 0;
     score += 1 + run * 2 + (j === 0 || "/\\-_. ".includes(s[j - 1]) ? 3 : 0) + (j >= nameAt ? 2 : 0);
-    at = j;
+    hits.push(j); at = j;
   }
-  return score - s.length * 0.01;
+  return { score: score - s.length * 0.01, hits: hits.reverse() };
+}
+export const fuzzyScore = (query, path) => fuzzyMatch(query, path)?.score ?? null;
+
+// Every path that matches, best first, as { path, hits }; all of them in order when there's no query.
+export function rank(query, paths) {
+  if (!query.trim()) return paths.map((path) => ({ path, hits: [] }));
+  return paths.map((path) => ({ path, m: fuzzyMatch(query, path) })).filter((x) => x.m)
+    .toSorted((a, b) => b.m.score - a.m.score).map(({ path, m }) => ({ path, hits: m.hits }));
 }
 
-// The paths that match, best first; all of them in order when there's no query.
-export function fuzzyFilter(query, paths, max = LIST_MAX) {
-  if (!query.trim()) return paths.slice(0, max);
-  return paths.map((p) => [p, fuzzyScore(query, p)]).filter(([, n]) => n !== null)
-    .toSorted((a, b) => b[1] - a[1]).slice(0, max).map(([p]) => p);
+// The opened ones first, newest first; the rest keep their order.
+export function openedFirst(paths, opened) {
+  const at = new Map(opened.map((p, i) => [p, i]));
+  return paths.toSorted((a, b) => (at.get(a) ?? Infinity) - (at.get(b) ?? Infinity));
+}
+
+// `text` split into runs, each { text, hit }, around the indexes in `hits`.
+export function runsOf(text, hits) {
+  const on = new Set(hits), runs = [];
+  for (let i = 0; i < text.length; i++) {
+    const hit = on.has(i), last = runs.at(-1);
+    if (last && last.hit === hit) last.text += text[i]; else runs.push({ text: text[i], hit });
+  }
+  return runs;
 }
 
 // The focused pane's machine (null: this one) and folder. A pane on an SSH
@@ -90,18 +108,38 @@ export default class MarkdownPanel extends View {
     this.handle = cx.focus_handle();
     this.query = "";
     this.input = InputState.new({ placeholder: "Find a Markdown file…" });
-    this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
-    this.input.on("submit", (_e, cx) => { const first = this.matches()[0]; if (first) this.open(first.path, cx, first.on); });
+    this.at = null; // the row chosen with the arrow keys
+    this.scroll = ScrollHandle.new();
+    this.input.on("change", (_e, cx) => { this.query = this.input.value(); this.at = null; cx.notify(); });
+    this.typing = false; // the search box has the keyboard
+    this.input.on("focus", () => { this.typing = true; });
+    this.input.on("blur", () => { this.typing = false; });
+    this.input.on("submit", (_e, cx) => { const m = this.matches().rows[this.chosen() ?? 0]; if (m) this.open(m.path, cx, m.on); });
     // Docked: a block of the layout (props {docked: true}), there in every tab. It follows the
     // focused pane's folder, leaves the keyboard alone and leaves files opened from outside to the window.
     this.docked = Boolean(props()?.docked);
     if (!this.docked) {
       this.input.focus();
       // A split pane is focused after init, which takes the focus back; ask again once it has.
-      cx.timer.after(600, () => { if (!this.doc) this.input.focus(); });
-    } else cx.timer.every(1000, (cx) => this.follow(cx));
+      for (const ms of [50, 200, 600]) cx.timer.after(ms, () => { if (!this.doc && !this.typing) this.input.focus(); });
+    } else {
+      cx.timer.every(1000, (cx) => this.follow(cx));
+      // `markdown-panel.focus` (a key, or a tab bar that has just shown the sidebar): to the search box.
+      cx.spawn(async (cx) => {
+        for (;;) {
+          if ((await nextCommand()) !== "focus") continue;
+          if (this.doc) this.back(cx); else this.input.focus();
+          cx.notify();
+        }
+      });
+    }
     // A binding, not on_key_down: a focused Textarea takes Escape first.
     cx.bind_keys(["MarkdownPanel", "MarkdownPanel > Input"].map((context) => ({ keystroke: "escape", action: "markdown_panel_escape", context })));
+    // Up and down in the file list only (the search box takes them first, for its cursor), so a file's editors keep theirs.
+    cx.bind_keys(["MarkdownList", "MarkdownList > Input"].flatMap((context) => [
+      { keystroke: "down", action: "markdown_panel_down", context },
+      { keystroke: "up", action: "markdown_panel_up", context },
+    ]));
     if (!this.docked) { this.watchOpens(cx, OPEN_DIR, false); this.watchOpens(cx, REVIEW_DIR, true); }
     this.watchReviews(cx);
     this.list(cx);
@@ -198,6 +236,7 @@ export default class MarkdownPanel extends View {
       }
       before?.release();
       this.notice = null;
+      if (!on) setShared(OPENED_KEY, [path, ...this.opened().filter((p) => p !== path)].slice(0, OPENED_MAX));
       this.doc = new MarkdownDoc(path, on, (to) => { if (isMarkdown(to)) this.open(to, cx, on); }, ICONS);
       this.doc.load(cx);
       this.watch(path, cx);
@@ -255,24 +294,50 @@ export default class MarkdownPanel extends View {
     });
   }
 
-  // Escape empties the search before it closes the panel.
+  // Escape empties the search before it closes the panel. Docked, it never hides the sidebar:
+  // it goes back from a file, then hands the keyboard back to the focused pane.
   escape(cx) {
     const doc = this.doc;
     if (doc && doc.active !== null) { doc.close(); cx.notify(); }
-    else if (!doc && this.query) { this.input.set_value(""); this.query = ""; cx.notify(); }
-    else this.dismiss(cx);
+    else if (!doc && this.query) { this.input.set_value(""); this.query = ""; this.at = null; cx.notify(); }
+    else if (!this.docked) this.dismiss(cx);
+    else if (doc) this.back(cx);
+    else if (focused()?.pane) run("pane.focus", { pane: focused().pane });
   }
 
-  // The rows the search keeps, by section: { section, path (absolute), on }.
+  // Markdown opened in any copy of the panel, newest first (this machine's files).
+  opened() { const o = shared(OPENED_KEY); return Array.isArray(o) ? o : []; }
+
+  // The highlighted row: the one chosen with the arrows, else the top match while searching.
+  chosen() { return this.at ?? (this.query ? 0 : null); }
+
+  // Up and down move the highlight through the rows.
+  move(by, cx) {
+    const n = this.matches().rows.length;
+    if (!n) return;
+    const from = this.chosen();
+    this.at = from === null ? (by > 0 ? 0 : n - 1) : Math.max(0, Math.min(n - 1, from + by));
+    this.reveal = true;
+    cx.notify();
+  }
+
+  // The rows the search keeps, by section, as { section, path (absolute), on, hits, ranked }:
+  // `hits` index `ranked`, the text that was matched. `more`: folder files left out.
   matches() {
-    const waiting = [...new Set(this.reviewing.map((x) => x.path))];
-    const shown = (paths) => fuzzyFilter(this.query, paths, this.query ? LIST_MAX : paths.length);
-    return [
-      ...shown(waiting).map((path) => ({ section: "waiting", path, on: null })),
-      ...shown(this.recent).map((path) => ({ section: "recent", path, on: null })),
-      // Scored on the path inside the folder, so the folder's own name matches nothing.
-      ...fuzzyFilter(this.query, this.files ?? []).map((f) => ({ section: "folder", path: `${this.folder}/${f}`, on: this.on })),
-    ];
+    const q = this.query, waiting = [...new Set(this.reviewing.map((x) => x.path))];
+    const others = (section, paths) => rank(q, paths).slice(0, q ? LIST_MAX : paths.length)
+      .map(({ path, hits }) => ({ section, path, on: null, hits, ranked: path }));
+    // Scored on the path inside the folder, so the folder's own name matches nothing.
+    const inFolder = this.files ?? [], at = this.folder;
+    const ordered = q || this.on ? inFolder : openedFirst(inFolder.map((f) => `${at}/${f}`), this.opened()).map((p) => p.slice(at.length + 1));
+    const ranked = rank(q, ordered);
+    return {
+      rows: [
+        ...others("waiting", waiting), ...others("recent", this.recent),
+        ...ranked.slice(0, LIST_MAX).map(({ path, hits }) => ({ section: "folder", path: `${at}/${path}`, on: this.on, hits, ranked: path })),
+      ],
+      more: Math.max(0, ranked.length - LIST_MAX),
+    };
   }
 
   render() {
@@ -284,8 +349,19 @@ export default class MarkdownPanel extends View {
     const reviewing = Boolean(doc) && !doc.on && this.reviewing.some((x) => x.path === doc.path);
     return v_flex().id("markdown-panel").key_context("MarkdownPanel").track_focus(this.handle)
       .on_action("markdown_panel_escape", (_e, cx) => this.escape(cx))
+      .on_action("markdown_panel_down", (_e, cx) => this.move(1, cx))
+      .on_action("markdown_panel_up", (_e, cx) => this.move(-1, cx))
       .size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
-      .on_key_down((e, cx) => doc?.key(e, cx))
+      .on_key_down((e, cx) => {
+        if (doc) { doc.key(e, cx); return; }
+        // A letter typed while the box hasn't the keyboard yet (a pane just opened): into the box.
+        if (!this.typing && e.key_char && !/(^|-)(cmd|ctrl|alt)-/.test(e.keystroke)) {
+          this.input.focus(); this.input.replace(e.key_char);
+          this.query = this.input.value(); this.at = null;
+          cx.stop_propagation(); cx.notify();
+          return;
+        }
+      })
       .child(h_flex().h(42).flex_none().px(10).gap(6).items_center().border_b(1).border_color(t.border)
         .when(Boolean(doc), (el) => el.child(button("md-back", "chevron-left", "Markdown in this folder", (cx) => this.back(cx))))
         .child(v_flex().flex_1().min_w(0).pl(doc ? 0 : 4)
@@ -302,29 +378,48 @@ export default class MarkdownPanel extends View {
   }
 
   listView(t) {
-    const matches = this.matches(), rel = (p) => p.slice(this.folder.length + 1);
-    const row = (id, name, sub, open) => h_flex().id(id).flex_none().h(30).px(10).gap(8).items_center().rounded(6).cursor_pointer()
-      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => open(cx))
-      .child(div().flex_none().truncate().child(name))
-      .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(sub));
+    const { rows, more } = this.matches(), chosen = this.chosen();
+    // The matched letters stand out.
+    const marked = (text, hits) => hits.length === 0 ? text
+      : h_flex().children(runsOf(text, hits).map((r) => r.hit ? div().font_semibold().text_color(t.accent).child(r.text) : div().child(r.text)));
     const heading = (text) => div().flex_none().px(10).pt(8).pb(2).text_size(11).text_color(t.dim).child(text);
-    const of = (section) => matches.filter((m) => m.section === section);
+    const rowOf = (m, i) => {
+      const name = nameOf(m.path), nameAt = m.ranked.length - name.length;
+      const nameHits = m.hits.filter((h) => h >= nameAt).map((h) => h - nameAt);
+      // Folder rows show the folder inside this one, the start of what was matched; the others their full folder.
+      const sub = m.section === "folder" ? (m.ranked.includes("/") ? folderOf(m.ranked) : "") : tildePath(folderOf(m.path), null);
+      const subHits = m.section === "folder" ? m.hits.filter((h) => h < nameAt - 1) : [];
+      return h_flex().id(`md-${m.section}-${i}`).flex_none().h(30).px(10).gap(8).items_center().rounded(6).cursor_pointer()
+        .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.open(m.path, cx, m.on))
+        .when(i === chosen, (el) => el.bg(t.hover))
+        .child(div().flex_none().truncate().child(marked(name, nameHits)))
+        .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(marked(sub, subHits)));
+    };
     // Reviews still waiting come first, so one closed by mistake is never out of reach.
-    const waiting = of("waiting"), recent = of("recent"), files = of("folder");
+    const items = [], at = { waiting: "Waiting for your review", recent: "From this terminal" };
+    let chosenItem = -1;
+    const add = (section) => rows.forEach((m, i) => {
+      if (m.section !== section) return;
+      if (i === chosen) chosenItem = items.length;
+      items.push(rowOf(m, i));
+    });
+    for (const section of ["waiting", "recent"]) {
+      if (rows.some((m) => m.section === section)) { items.push(heading(at[section])); add(section); }
+    }
+    if (items.length) items.push(heading("In this folder"));
+    const files = rows.filter((m) => m.section === "folder");
     const empty = this.files === null ? "Looking for Markdown…"
       : this.query ? "No Markdown file matches."
       : "No Markdown files in this folder. Cmd-click a .md path in a terminal to read it here.";
-    const rowOf = (m, i) => row(`md-${m.section}-${i}`, nameOf(m.path),
-      m.section === "folder" ? (rel(m.path).includes("/") ? folderOf(rel(m.path)) : "") : tildePath(folderOf(m.path), null),
-      (cx) => this.open(m.path, cx, m.on)).when(Boolean(this.query) && m === matches[0], (el) => el.bg(t.hover));
-    return v_flex().flex_1().min_h(0)
+    if (!files.length) items.push(div().flex_none().px(10).py(6).text_size(12.5).text_color(t.dim).child(empty));
+    add("folder");
+    if (more) items.push(div().flex_none().px(10).py(6).text_size(11.5).text_color(t.dim).child(`${more} more · type to narrow`));
+    // After an arrow key, scroll the highlighted row into view.
+    if (this.reveal && chosenItem >= 0) this.scroll.scroll_to_item(chosenItem);
+    this.reveal = false;
+    return v_flex().key_context("MarkdownList").flex_1().min_h(0)
       .child(h_flex().h(32).flex_none().mx(8).mt(8).px(8).gap(8).items_center().rounded(7).border_1().border_color(t.border).bg(t.raised)
         .child(Input.new(this.input).flex_1().h_full().text_size(12.5).text_color(t.foreground)))
-      .child(div().id("md-files").flex_1().min_h(0).overflow_y_scrollbar().p(6)
-        .when(waiting.length > 0, (el) => el.child(heading("Waiting for your review")).children(waiting.map(rowOf)))
-        .when(recent.length > 0, (el) => el.child(heading("From this terminal")).children(recent.map(rowOf)))
-        .when(recent.length > 0 || waiting.length > 0, (el) => el.child(heading("In this folder")))
-        .when(!files.length, (el) => el.child(div().flex_none().px(10).py(6).text_size(12.5).text_color(t.dim).child(empty)))
-        .children(files.map(rowOf)));
+      .child(div().id("md-files").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.scroll).p(6).children(items));
   }
 }
