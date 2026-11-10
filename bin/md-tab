@@ -1,4 +1,4 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 # Build a tab: agent on the left, Markdown panel on the right, shell under the agent.
 set -euo pipefail
 
