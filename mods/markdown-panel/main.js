@@ -92,39 +92,62 @@ export default class MarkdownPanel extends View {
     this.input = InputState.new({ placeholder: "Find a Markdown file…" });
     this.input.on("change", (_e, cx) => { this.query = this.input.value(); cx.notify(); });
     this.input.on("submit", (_e, cx) => { const first = this.matches()[0]; if (first) this.open(first.path, cx, first.on); });
-    this.input.focus();
-    // A split pane is focused after init, which takes the focus back; ask again once it has.
-    cx.timer.after(600, () => { if (!this.doc) this.input.focus(); });
+    // Docked: a block of the layout (props {docked: true}), there in every tab. It follows the
+    // focused pane's folder, leaves the keyboard alone and leaves files opened from outside to the window.
+    this.docked = Boolean(props()?.docked);
+    if (!this.docked) {
+      this.input.focus();
+      // A split pane is focused after init, which takes the focus back; ask again once it has.
+      cx.timer.after(600, () => { if (!this.doc) this.input.focus(); });
+    } else cx.timer.every(1000, (cx) => this.follow(cx));
     // A binding, not on_key_down: a focused Textarea takes Escape first.
     cx.bind_keys(["MarkdownPanel", "MarkdownPanel > Input"].map((context) => ({ keystroke: "escape", action: "markdown_panel_escape", context })));
-    this.watchOpens(cx, OPEN_DIR, false);
-    this.watchOpens(cx, REVIEW_DIR, true);
+    if (!this.docked) { this.watchOpens(cx, OPEN_DIR, false); this.watchOpens(cx, REVIEW_DIR, true); }
     this.watchReviews(cx);
     this.list(cx);
-    this.findRecent(focused()?.terminal ?? null, cx);
+    this.terminal = focused()?.terminal ?? null;
+    this.findRecent(this.terminal, cx);
     const file = fileFromProps(props());
     if (file) this.open(file, cx);
   }
 
+  // Docked: list the folder of the pane now focused. A click on the panel itself focuses no pane.
+  follow(cx) {
+    const f = focused();
+    if (!f?.pane) return;
+    const { on, folder } = placeOf(f, spaces(), home());
+    if (on === this.on && folder === this.folder && f.terminal === this.terminal) return;
+    const moved = on !== this.on || folder !== this.folder;
+    this.on = on; this.folder = folder; this.terminal = f.terminal;
+    if (moved) { this.files = null; this.list(cx); }
+    this.findRecent(f.terminal, cx);
+    cx.notify();
+  }
+
   findRecent(terminal, cx) {
-    if (this.on) return;
+    if (this.on) { this.recent = []; return; }
     cx.spawn(async (cx) => {
       const r = await exec("sh", [`${appHome()}/mods/markdown-panel/recent.sh`, terminal ?? ""]).catch(() => null);
+      if (this.docked && terminal !== this.terminal) return;
       this.recent = recentIn(r?.stdout ?? "");
       cx.notify();
     });
   }
 
   list(cx) {
-    const on = this.on;
+    const on = this.on, asked = this.folder;
+    // Docked, the focus can move on while this runs; a listing of the folder left behind is dropped.
+    const stale = (folder) => this.on !== on || this.folder !== folder;
     cx.spawn(async (cx) => {
       // A machine's home when its pane told no folder: where its commands start.
-      const folder = this.folder || (await exec("pwd", [], { on }).catch(() => null))?.stdout.trim() || "";
+      const folder = asked || (await exec("pwd", [], { on }).catch(() => null))?.stdout.trim() || "";
+      if (stale(asked)) return;
       this.folder = folder;
       const where = { cwd: folder || undefined, on };
       const git = await exec("git", ["ls-files", "--", "*.md", "*.markdown", "*.mdx"], where).catch(() => null);
       const out = git?.code === 0 && git.stdout.trim() ? git.stdout
         : (await exec("find", [".", "-maxdepth", "3", "-name", "node_modules", "-prune", "-o", "-type", "f", "(", "-iname", "*.md", "-o", "-iname", "*.mdx", ")", "-print"], where).catch(() => null))?.stdout ?? "";
+      if (stale(folder)) return;
       this.files = markdownIn(out.replace(/^\.\//gm, ""));
       cx.notify();
     });
@@ -195,7 +218,8 @@ export default class MarkdownPanel extends View {
   dismiss(cx) {
     const doc = this.doc, id = props()?.overlay;
     // As a split pane there is no overlay; close the focused pane (the one just clicked).
-    const done = () => { if (id) closeOverlay(id); else run("pane.close"); };
+    // Docked, hide the layout's side panel it sits in.
+    const done = () => { if (id) closeOverlay(id); else if (this.docked) run("layout.hide", { id: "panel" }); else run("pane.close"); };
     if (!doc) { done(); return; }
     cx.spawn(async (cx) => {
       if (!(await doc.flush())) { cx.notify(); return; }
