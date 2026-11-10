@@ -29,12 +29,16 @@ Enter opens the top match:
 
 Tell your agent: **`add the herdr mod at github.com/phin-tech/herdr-markdown-panel, and link bin/md-tab onto my PATH`**
 
+Or install the agent skill, which knows how to install, update and dock the panel: `npx skills add phin-tech/herdr-markdown-panel`, then ask your agent to install the Markdown panel.
+
 Or by hand: copy `mods/markdown-panel` to `~/.config/herdr-app/mods/` and merge `keys.json` into `~/.config/herdr-app/keys.json`.
 
 | Key | Does |
 |---|---|
 | `cmd-shift-m` | Floating window (press again to close) |
 | `cmd-alt-m` | Split pane to the right of the focused pane |
+
+To keep the panel in every tab, dock it in a layout as a block with `"content": { "mod": "markdown-panel", "props": { "docked": true } }`, for example as another child of `main`'s `panel-body` stack. Docked, it lists the focused pane's folder as you move between panes and tabs, its close button hides the layout's `panel` column, and it leaves files opened from outside to the floating window.
 
 To open a file from a script, pass it as a prop: `herdr-app do pane.split --direction right --mod markdown-panel --props '{"file":"/abs/path.md"}'`. The same works for `tab.new`.
 
