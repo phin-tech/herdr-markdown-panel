@@ -1,0 +1,34 @@
+#!/opt/homebrew/bin/bash
+# Build a tab: agent on the left, Markdown panel on the right, shell under the agent.
+set -euo pipefail
+
+usage() { echo "usage: md-tab [--name N] [--file /abs/file.md] [--agent claude] [--task TEXT] [--folder DIR]" >&2; exit 2; }
+
+name="" file="" agent="claude" task="" folder="$PWD"
+while (($#)); do
+  case "$1" in
+    --name) name="$2" ;; --file) file="$2" ;; --agent) agent="$2" ;;
+    --task) task="$2" ;; --folder) folder="$2" ;; *) usage ;;
+  esac
+  shift 2 || usage
+done
+
+# Explicit space and pane: the focused ones may not be where this was run from.
+here=$(herdr-app ls | jq -c --arg t "${HC_TERMINAL_ID:-}" \
+  '[.spaces[] | . as $s | .tabs[].terminals[] | select(.terminal == $t) | {space: $s.id}] | first // {}')
+space=$(jq -r '.space // empty' <<<"$here")
+
+args=(tab.new --argv "$(jq -cn --arg a "$agent" '[$a]')" --folder "$folder")
+[[ -n "$name" ]] && args+=(--name "$name")
+[[ -n "$task" ]] && args+=(--task "$task")
+[[ -n "$space" ]] && args+=(--space "$space")
+made=$(herdr-app do "${args[@]}")
+tab=$(jq -r '.tab' <<<"$made")
+terminal=$(jq -r '.terminal' <<<"$made")
+
+pane=$(herdr-app ls | jq -r --arg t "$terminal" '.spaces[].tabs[].terminals[] | select(.terminal == $t) | .pane')
+props=$(jq -cn --arg f "$file" 'if $f == "" then {} else {file: $f} end')
+herdr-app do pane.split --pane "$pane" --direction right --mod markdown-panel --props "$props" >/dev/null
+herdr-app do pane.split --pane "$pane" --direction down >/dev/null
+herdr-app do tab.select --id "$tab" >/dev/null
+echo "$tab"
