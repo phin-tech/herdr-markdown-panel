@@ -51,6 +51,9 @@ export function recentIn(listing) {
   return [...new Set(listing.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("/") && isMarkdown(l)))].slice(0, RECENT_MAX);
 }
 
+// An absolute Markdown path given as the pane's `file` prop (pane.split / tab.new {mod, props}).
+export const fileFromProps = (p) => (typeof p?.file === "string" && p.file.startsWith("/") && isMarkdown(p.file) ? p.file : null);
+
 export default class MarkdownPanel extends View {
   init(_props, cx) {
     this.doc = null; this.files = null; this.recent = [];
@@ -66,6 +69,8 @@ export default class MarkdownPanel extends View {
     this.watchReviews(cx);
     this.list(cx);
     this.findRecent(focused()?.terminal ?? null, cx);
+    const file = fileFromProps(props());
+    if (file) this.open(file, cx);
   }
 
   findRecent(terminal, cx) {

@@ -18,7 +18,9 @@ Copy `mods/markdown-panel` to `~/.config/herdr-app/mods/` and merge `keys.json` 
 | `cmd-shift-m` | Floating window (press again to close) |
 | `cmd-alt-m` | Split pane to the right of the focused pane |
 
-To open a given file, write its absolute path to `~/.config/herdr-app/data/kanso-open/<name>.path`, then open the panel.
+To open a file from a script, pass it as a prop: `herdr-app do pane.split --direction right --mod markdown-panel --props '{"file":"/abs/path.md"}'`. The same works for `tab.new`.
+
+To open a file from outside, write its absolute path to `~/.config/herdr-app/data/kanso-open/<name>.path`, then open the panel.
 
 ## What it runs
 
